@@ -8,7 +8,7 @@ import re
 import datetime
 from random import sample
 
-from Pos_Tagger import Sentence, Tagged_Sentence, Indexer, Pos_Tagger
+from Pos_Tagger import Sentence, Tagged_Sentence, Indexer, Pos_Tagger, to_char_indexes
 
 import torch
 import torch.nn as nn
@@ -32,7 +32,7 @@ class POS_Tagged_Corpus(torch.utils.data.dataset.Dataset):
         self.len_longest_sent = 0
         self.len_longest_word = 0
         
-        self._tags.add("<!PAD!>")
+        self._tags.add(" ")
         self._tags.add(" ")
         self._chars.add(" ")
         self._vocab.add(" ")
@@ -49,12 +49,11 @@ class POS_Tagged_Corpus(torch.utils.data.dataset.Dataset):
             words = tagged_sentence.words()
             tags = tagged_sentence.tags()
             for i in range(self.len_longest_sent - len(tags)):
-                tags.append("<!PAD!>")
+                tags.append(" ")
                 words.append(" ")
-            
-            sent_in_word_indexes = self.word_indexer.prepare_sequence(words)
-            tag_indexes = self.tag_indexer.prepare_sequence(tags)
-            self.data.append((sent_in_word_indexes, tag_indexes))
+
+            tag_indexes =  torch.tensor(self.tag_indexer.prepare_sequence(tags), dtype=torch.long).to(device)
+            self.data.append((words, tag_indexes))
 
         errprint(self)
 
@@ -115,33 +114,44 @@ def train(pos_tagger, pos_tagged_corpus):
     lr = pos_tagger.lr
     total_epoch = pos_tagger.total_epoch
 
-    loss_function = nn.NLLLoss()
+    loss_function = nn.NLLLoss(reduction = "elementwise_mean").to(device)
     optimizer = optim.SGD(pos_tagger.parameters(), lr=lr)
 
     data_loader = DataLoader(pos_tagged_corpus, batch_size=pos_tagger.batch_size, shuffle=True)
 
-    # total = len(data_loader) * total_epoch
-    # count = 0
-    # start_time = datetime.datetime.now()
+    total = len(data_loader) * total_epoch
+    count = 0
+    start_time = datetime.datetime.now()
     for epoch in range(total_epoch):
         for i, data in enumerate(data_loader):
-            sent, sentence_tags = data
-            sent = sent.to(device)
-            sentence_tags = sentence_tags.to(device)
+            sents, sentence_tagss = data
+            sents = [list(sent) for sent in zip(*sents)]
+            # Should implement a randomizer that replaces word with <UNK> to increase some depedency on char level representation
+            # If time permits
+            sents_in_word_indexes = torch.tensor([pos_tagged_corpus.word_indexer.prepare_sequence(sent) for sent in sents]).to(device)
+            sents_in_char_indexes = to_char_indexes(sents, pos_tagged_corpus.char_indexer, pos_tagged_corpus.len_longest_word).to(device)
+
             pos_tagger.zero_grad()
-            pos_tagger.reinit_hidden(len(sent))
-            tag_scores = pos_tagger(sent.t())
-            loss = loss_function(tag_scores.transpose(0,1).transpose(1,2), sentence_tags)
+            pos_tagger.reinit_hidden(sents_in_word_indexes.size()[0])
+            
+            tag_scores = pos_tagger(sents_in_word_indexes, sents_in_char_indexes)
+
+            # transposition_start = datetime.datetime.now()
+            transposed_tag_scores = tag_scores.transpose(1,2)
+            # errprint("Transposition time wasted: ", datetime.datetime.now() - transposition_start)
+
+            # loss_start = datetime.datetime.now()
+            loss = loss_function(transposed_tag_scores, sentence_tagss)
             loss.backward()
+            # errprint("Loss time wasted: ", datetime.datetime.now() - loss_start)
+
             optimizer.step()
 
-            # count += 1
-            # if count % 10 == 0:
-            #     end_time = datetime.datetime.now()
-            #     errprint('Estimated time left:', (end_time - start_time)/ count * (total - count))
-            #     # errprint("Targets:", targets, "\ntag_scores:", tag_scores)
-            #     errprint("Loss:", loss)
-            #     errprint("Training Char Level CNN:", count/total*100, "%")
+            count += 1
+            end_time = datetime.datetime.now()
+            errprint('Estimated time left:', (end_time - start_time)/ count * (total - count))
+            errprint("Loss:", loss)
+            errprint("Training:", count/total*100, "%")
 
 def train_model(train_file, model_file):
     # write your code here. You can add functions as well.
@@ -179,7 +189,7 @@ def train_model(train_file, model_file):
     print('Finished...')
     
     end_time = datetime.datetime.now()
-    print('Time:', end_time - start_time)
+    print('Build Tagger Time:', end_time - start_time)
 		
 if __name__ == "__main__":
     # make no changes here

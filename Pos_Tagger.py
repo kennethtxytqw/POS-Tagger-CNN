@@ -3,6 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import datetime, sys
+
+def errprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
 
 class Pos_Tagger(nn.Module):    
     def __init__(self, word_indexer, tagset_size, len_longest_sent, char_indexer=None,  len_longest_word=None, pad=0, device="cpu"):
@@ -12,15 +17,15 @@ class Pos_Tagger(nn.Module):
         self.device = device
 
         # Hyperparameters
-        self.batch_size = 16
+        self.batch_size = 8
         self.lr = 0.2
-        self.total_epoch = 5
-        self.word_dim = 200
-        self.hidden_dim = 100
-        self.char_dim = 10
+        self.total_epoch = 1
+        self.word_dim = 256
+        self.hidden_dim = 128
+        self.char_dim = 16
         self.window_size = 3
-        self.conv_filters_size = 20
-        self.with_char_level = True
+        self.conv_filters_size = 64
+        self.with_char_level = False
 
         self.tagset_size = tagset_size
         self.word_indexer = word_indexer
@@ -28,72 +33,71 @@ class Pos_Tagger(nn.Module):
         self.len_longest_sent = len_longest_sent
 
         self.word_embeddings = nn.Embedding(self.word_vocab_size, self.word_dim)
+        self.word_embeddings.weight.data[word_indexer.index("<UNK>")] = 0
         if self.with_char_level:
             # With char level representation
-            assert char_indexer
-            assert len_longest_word
             self.len_longest_word = len_longest_word
             self.char_indexer = char_indexer
             self.char_vocab_size = self.char_indexer.size()
             self.char_embeddings = nn.Embedding(self.char_vocab_size, self.char_dim)
-            self.lstm= nn.LSTM(self.word_dim + self.conv_filters_size, self.hidden_dim//2 , bidirectional=True)
-            self.conv = nn.Conv1d(1, self.conv_filters_size, self.window_size * self.char_dim)
+            self.lstm= nn.LSTM(input_size = self.word_dim + self.conv_filters_size, hidden_size = self.hidden_dim//2 , bidirectional=True, batch_first=True, bias=True)
+            self.conv = nn.Conv1d(1, self.conv_filters_size, self.window_size * self.char_dim, bias=True)
             self.padding_layer = nn.ConstantPad1d((self.window_size-1)//2, pad)
         else:
             # Without char level representation
-            self.lstm= nn.LSTM(self.word_dim, self.hidden_dim//2 , bidirectional=True)
-        self.hidden2tag = nn.Linear(self.hidden_dim, self.tagset_size)
+            self.lstm= nn.LSTM(input_size = self.word_dim, hidden_size = self.hidden_dim//2 , bidirectional=True, batch_first=True, bias=True)
+        self.hidden2tag = nn.Linear(self.hidden_dim, self.tagset_size, bias=True)
 
     def reinit_hidden(self, curr_batch_size):
         self.hidden = (torch.zeros(2, curr_batch_size, self.hidden_dim//2).to(self.device),
                 torch.zeros(2, curr_batch_size, self.hidden_dim//2).to(self.device))
 
     def forward_char_level(self, word_in_char_indexes):
-        char_embeds = self.char_embeddings(self.padding_layer(word_in_char_indexes.to(self.device)))
-        # print("char_embeds", char_embeds.size())
+        char_embeds = self.char_embeddings(self.padding_layer(word_in_char_indexes))
+        # errprint("char_embeds", char_embeds.size())
         conv_result = self.conv(char_embeds.view(char_embeds.size()[0], 1, -1))
         
-        # print("conv_result", conv_result.size())
+        # errprint("conv_result", conv_result.size())
         return conv_result.max(2)[0]
 
-    def forward(self, sent_in_word_indexes):
+    def forward(self, sents_in_w_indices, sents_in_char_indexes=None):
         # Expect sent to be a sequence of word indexes
-        curr_batch_size = sent_in_word_indexes.size()[1]
-        sent_in_word_indexes = sent_in_word_indexes.to(self.device)
-        # print("sent_in_word_indexes", sent_in_word_indexes.size())
-        word_embeds = self.word_embeddings(sent_in_word_indexes)
-        # print("word_embeds", word_embeds.size())
+        curr_batch_size = sents_in_w_indices.size()[0]
+        sent_len = sents_in_w_indices.size()[1]
+        # errprint("sents_in_w_indices: B x sent_len", sents_in_w_indices.size())
+        word_embeds = self.word_embeddings(sents_in_w_indices)
+        # errprint("word_embeds: B x sent_len x word_dim", word_embeds.size())
         if self.with_char_level:
-            print("sent_in_word_indexes", sent_in_word_indexes.size())
-            sents_in_char_level = []
-            for seq in sent_in_word_indexes.t():
-                sent_in_char_indexes = []
-                for word_index in seq:
-                    word_in_char_index = self.char_indexer.prepare_sequence(self.word_indexer.element(word_index), pad=" ", length=self.len_longest_word)
-                    sent_in_char_indexes.append(word_in_char_index)
-                sent_in_char_indexes =  torch.stack(sent_in_char_indexes).to(self.device)
-                sent_in_char_level = self.forward_char_level(sent_in_char_indexes).to(self.device)
-                sents_in_char_level.append(sent_in_char_level)
-                
-                # print("sent_in_char_indexes", sent_in_char_indexes.size())
-                # print("sent_in_char_level", sent_in_char_level.size())
-            sents_in_char_level = torch.stack(sents_in_char_level)
-            # print("sents_in_char_level", sents_in_char_level.size())
-            lstm_in = torch.cat((word_embeds, sents_in_char_level.transpose(0,1)), dim = 2).to(self.device)
+            # errprint("sents_in_char_indexes: B x sent_len x word_len", sents_in_char_indexes.size())
+            sents_in_char_indexes = sents_in_char_indexes.view(curr_batch_size * sent_len, self.len_longest_word).to(self.device)
+            # errprint("sents_in_char_indexes: (B * sent_len) x word_len", sents_in_char_indexes.size())
+            sents_in_char_level = self.forward_char_level(sents_in_char_indexes)
+            sents_in_char_level = sents_in_char_level.view(curr_batch_size, sent_len, self.conv_filters_size)
+
+            # errprint("sents_in_char_level: B x sent_len x conv_size", sents_in_char_level.size())
+            lstm_in = torch.cat((word_embeds, sents_in_char_level), dim = 2).to(self.device)
+            # errprint("lstm_in: B x sent_len x (word_dim + conv_size)", lstm_in.size())
         else:
             lstm_in = word_embeds
-            
-        # print("lstm_in", lstm_in.size())
+            # errprint("lstm_in: B x sent_len x word_dim", lstm_in.size())
+
+        # start_time = datetime.datetime.now()
+        # errprint("hidden: 2 x B x hidden_dim//2", self.hidden[0].size())
         lstm_out, self.hidden = self.lstm(lstm_in, self.hidden)
         lstm_out = lstm_out.to(self.device)
+        # errprint("lstm_out: B x sent_len x (2*hidden_dim)", lstm_out.size())
 
+        # end_time = datetime.datetime.now()
+        # errprint('LSTM Time:', end_time - start_time)
+
+        # start_time = datetime.datetime.now()
         tag_space = self.hidden2tag(lstm_out)
+        # errprint("tag_space: B x sent_len x tagset_size", tag_space.size())
         tag_scores = F.log_softmax(tag_space, dim=2)
-        
-        # print("lstm_in", lstm_in.size())
-        # print("lstm_out", lstm_out.size())
-        # print("tag_space", tag_space.size())
-        # print("tag_scores", tag_scores.size())
+        # errprint("tag_scores: B x sent_len x tagset_size", tag_scores.size())
+        # end_time = datetime.datetime.now()
+        # errprint('Hidden2tag2logsoftmax Time:', end_time - start_time)
+
         return tag_scores
 
 class Indexer(object):
@@ -108,7 +112,6 @@ class Indexer(object):
             if vocab != None:
                 vocab = list(vocab)
                 vocab.append('<UNK>')
-                vocab.sort()
                 self._vocab = vocab
                 for index, element in enumerate(vocab):
                     self._element2index[element] = index
@@ -117,26 +120,24 @@ class Indexer(object):
         return self._vocab[index]
 
     def index(self, element):
-        if element in self._element2index:
+        try:
             return self._element2index[element]
-        else:
+        except:
             return self._element2index['<UNK>']
 
     def prepare_sequence(self, seq, pad=None, length=None):
-        indexes = [self.index(element) for element in seq]
         if length:
-            if len(indexes) > length:
-                indexes = indexes[:length]
-            else:
-                for i in range (length - len(indexes)):
-                    indexes.append(self.index(pad))
-        return torch.tensor(indexes, dtype=torch.long)
+            indexes = np.zeros(length)
+            for i in range(len(seq)):
+                if i == length:
+                    break
+                indexes[i] = self.index(seq[i])
+            return indexes
+        else:
+            return [self.index(element) for element in seq]
 
     def get_dict(self):
         return self._element2index
-
-    def load_dict(self, d):
-        self._element2index = d
 
     def size(self):
         return len(self._element2index)
@@ -178,3 +179,15 @@ class Tagged_Sentence(Sentence):
 
     def to_string(self):
         return " ".join([ word + '/' + self._tags[i] for i, word in enumerate(self.words())])
+
+def to_char_indexes(sents_in_w, char_indexer, len_longest_word):
+    # start_time = datetime.datetime.now()
+    sents_in_char_indexes = []
+    for sent in sents_in_w:
+        sent_in_char_indexes = [char_indexer.prepare_sequence(word, pad=" ", length=len_longest_word) for word in sent]
+        sents_in_char_indexes.append(sent_in_char_indexes)
+    sents_in_char_indexes = torch.tensor(sents_in_char_indexes, dtype=torch.long)
+    # end_time = datetime.datetime.now()
+
+    # errprint('Prepping char indexes Time:', end_time - start_time)
+    return sents_in_char_indexes

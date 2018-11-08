@@ -5,11 +5,36 @@ import math
 import sys
 import torch
 import datetime
+from torch.utils.data import Dataset, DataLoader
 
-
-from Pos_Tagger import Pos_Tagger, Indexer, Tagged_Sentence, Sentence
+from Pos_Tagger import Pos_Tagger, Indexer, Tagged_Sentence, Sentence, to_char_indexes
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+class TestSet(torch.utils.data.dataset.Dataset):    
+    def __init__(self, file, word_indexer, len_longest_sent):
+        super(TestSet, self).__init__()
+        self.data = []
+        
+        self.word_indexer = word_indexer
+        self.len_longest_sent = len_longest_sent
+        self.consume_file(file)
+
+    def consume_file(self, file):
+        with open(file, "r") as f:
+            for line in f:
+                if len(line) != 0:
+                    self.consume_line(line)
+
+    def consume_line(self, line):
+        words = line.rstrip().split(" ")
+        self.data.append(words)
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+    def __len__(self):
+        return len(self.data)
 
 def tag_sentence(test_file, model_file, out_file):
     # write your code here. You can add functions as well.
@@ -35,15 +60,19 @@ def tag_sentence(test_file, model_file, out_file):
     pos_tagger.load_state_dict(checkpoint['pos_tagger'])
     pos_tagger = pos_tagger.to(device)
     
-    pos_tagger.reinit_hidden(1)
     tagged_sentences = []
-    with open(test_file, 'r') as tf:
-        for line in tf:
-            words = line.rstrip().split(" ")
-            sent_in_word_indexes = word_indexer.prepare_sequence(words, pad=" ", length=len_longest_sent).to(device)
-            tag_scores = pos_tagger(sent_in_word_indexes.view(-1, 1))
-            tags = get_tags(tag_scores, tag_indexer)
-            tagged_sentence = Tagged_Sentence(words=words, tags=tags)
+    data_loader = DataLoader(TestSet(test_file, word_indexer, len_longest_sent), batch_size=1)
+    for i, sents in enumerate(data_loader):
+        sents = [list(sent) for sent in zip(*sents)]
+        sents_in_word_indexes = torch.tensor([word_indexer.prepare_sequence(sent) for sent in sents]).to(device)
+        sents_in_char_indexes = to_char_indexes(sents, char_indexer, len_longest_word).to(device)
+        pos_tagger.reinit_hidden(len(sents))
+        
+        tag_scores = pos_tagger(sents_in_word_indexes, sents_in_char_indexes)
+        # print("tag_scores: B x sent_len x tagset_size", tag_scores.size())
+        tags = get_tags(tag_scores, tag_indexer)
+        for j, sent in enumerate(sents):
+            tagged_sentence = Tagged_Sentence(words=sent, tags=tags[j])
             tagged_sentences.append(tagged_sentence)
 
     with open(out_file, 'w') as of:
@@ -53,13 +82,11 @@ def tag_sentence(test_file, model_file, out_file):
     print('Finished...')
     
     end_time = datetime.datetime.now()
-    print('Time:', end_time - start_time)
+    print('Run Tagger Time:', end_time - start_time)
 
 def get_tags(tag_scores, tag_indexer):
-    tags = []
-    for tag_scores_of_word in tag_scores:
-        tags.append(tag_indexer.element(torch.argmax(tag_scores_of_word)))
-    return tags
+    tags_indices = torch.argmax(tag_scores, dim =2)
+    return [tag_indexer.read_seq(batch_tag_indices) for batch_tag_indices in tags_indices]
 
 
 if __name__ == "__main__":
