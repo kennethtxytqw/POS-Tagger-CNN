@@ -17,15 +17,15 @@ class Pos_Tagger(nn.Module):
         self.device = device
 
         # Hyperparameters
-        self.batch_size = 8
-        self.lr = 0.2
-        self.total_epoch = 1
+        self.batch_size = 32 # I am not sure what is wrong but when I use batching my accuracy drops like mad... But to fulfil the time constraint I have no choice
+        self.lr = 1.5 # This is a by-product too... 1.2 is a little high
+        self.total_epoch = 2
         self.word_dim = 256
-        self.hidden_dim = 128
+        self.hidden_dim = 64
         self.char_dim = 16
         self.window_size = 3
-        self.conv_filters_size = 64
-        self.with_char_level = False
+        self.conv_filters_size = 8
+        self.with_char_level = True
 
         self.tagset_size = tagset_size
         self.word_indexer = word_indexer
@@ -41,7 +41,7 @@ class Pos_Tagger(nn.Module):
             self.char_vocab_size = self.char_indexer.size()
             self.char_embeddings = nn.Embedding(self.char_vocab_size, self.char_dim)
             self.lstm= nn.LSTM(input_size = self.word_dim + self.conv_filters_size, hidden_size = self.hidden_dim//2 , bidirectional=True, batch_first=True, bias=True)
-            self.conv = nn.Conv1d(1, self.conv_filters_size, self.window_size * self.char_dim, bias=True)
+            self.conv = nn.Conv1d(1, self.conv_filters_size, self.window_size * self.char_dim, stride=self.char_dim, bias=True)
             self.padding_layer = nn.ConstantPad1d((self.window_size-1)//2, pad)
         else:
             # Without char level representation
@@ -54,10 +54,12 @@ class Pos_Tagger(nn.Module):
 
     def forward_char_level(self, word_in_char_indexes):
         char_embeds = self.char_embeddings(self.padding_layer(word_in_char_indexes))
-        # errprint("char_embeds", char_embeds.size())
-        conv_result = self.conv(char_embeds.view(char_embeds.size()[0], 1, -1))
+        # errprint("char_embeds: (B * sent_len) x (word_len+padding) x char_dim", char_embeds.size())
+        flattened_char_embeds = char_embeds.view(char_embeds.size()[0], 1, -1)
+        # errprint("flattened_char_embeds: (B * sent_len) x 1 x (word_len+padding)*char_dim", flattened_char_embeds.size())
+        conv_result = self.conv(flattened_char_embeds)
         
-        # errprint("conv_result", conv_result.size())
+        # errprint("conv_result: (B * sent_len) x conv_size x word_len", conv_result.size())
         return conv_result.max(2)[0]
 
     def forward(self, sents_in_w_indices, sents_in_char_indexes=None):
@@ -70,8 +72,10 @@ class Pos_Tagger(nn.Module):
         if self.with_char_level:
             # errprint("sents_in_char_indexes: B x sent_len x word_len", sents_in_char_indexes.size())
             sents_in_char_indexes = sents_in_char_indexes.view(curr_batch_size * sent_len, self.len_longest_word).to(self.device)
-            # errprint("sents_in_char_indexes: (B * sent_len) x word_len", sents_in_char_indexes.size())
+            # errprint("flattened_sents_in_char_indexes: (B * sent_len) x word_len", sents_in_char_indexes.size())
             sents_in_char_level = self.forward_char_level(sents_in_char_indexes)
+            
+            # errprint("flattened_sents_in_char_level: (B*sent_len) x conv_size", sents_in_char_level.size())
             sents_in_char_level = sents_in_char_level.view(curr_batch_size, sent_len, self.conv_filters_size)
 
             # errprint("sents_in_char_level: B x sent_len x conv_size", sents_in_char_level.size())

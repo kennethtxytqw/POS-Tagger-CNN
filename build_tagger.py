@@ -114,30 +114,39 @@ def train(pos_tagger, pos_tagged_corpus):
     lr = pos_tagger.lr
     total_epoch = pos_tagger.total_epoch
 
-    loss_function = nn.NLLLoss(reduction = "elementwise_mean").to(device)
+    loss_function = nn.NLLLoss().to(device)
     optimizer = optim.SGD(pos_tagger.parameters(), lr=lr)
 
     data_loader = DataLoader(pos_tagged_corpus, batch_size=pos_tagger.batch_size, shuffle=True)
 
     total = len(data_loader) * total_epoch
     count = 0
+    prev_loss = 0
     start_time = datetime.datetime.now()
     for epoch in range(total_epoch):
         for i, data in enumerate(data_loader):
-            sents, sentence_tagss = data
-            sents = [list(sent) for sent in zip(*sents)]
             # Should implement a randomizer that replaces word with <UNK> to increase some depedency on char level representation
             # If time permits
+
+            sents, sentence_tagss = data
+            
+            # data_prep_start = datetime.datetime.now()
+            sents = [list(sent) for sent in zip(*sents)]
             sents_in_word_indexes = torch.tensor([pos_tagged_corpus.word_indexer.prepare_sequence(sent) for sent in sents]).to(device)
             sents_in_char_indexes = to_char_indexes(sents, pos_tagged_corpus.char_indexer, pos_tagged_corpus.len_longest_word).to(device)
-
+            # errprint("data_prep time wasted: ", datetime.datetime.now() - data_prep_start)
+            
             pos_tagger.zero_grad()
             pos_tagger.reinit_hidden(sents_in_word_indexes.size()[0])
             
+            # pos_tagger_start = datetime.datetime.now()
             tag_scores = pos_tagger(sents_in_word_indexes, sents_in_char_indexes)
+            # errprint("pos_tagger time wasted: ", datetime.datetime.now() - pos_tagger_start)
 
             # transposition_start = datetime.datetime.now()
             transposed_tag_scores = tag_scores.transpose(1,2)
+            # errprint("transposed_tag_scores: B x tagset_size x sent_len", transposed_tag_scores.size())
+            # errprint("sentence_tagss: B x sent_len", sentence_tagss.size())
             # errprint("Transposition time wasted: ", datetime.datetime.now() - transposition_start)
 
             # loss_start = datetime.datetime.now()
@@ -145,14 +154,18 @@ def train(pos_tagger, pos_tagged_corpus):
             loss.backward()
             # errprint("Loss time wasted: ", datetime.datetime.now() - loss_start)
 
+            # optimizer_start = datetime.datetime.now()
             optimizer.step()
+            # errprint("optimizer time wasted: ", datetime.datetime.now() - optimizer_start)
 
             count += 1
             end_time = datetime.datetime.now()
             errprint('Estimated time left:', (end_time - start_time)/ count * (total - count))
-            errprint("Loss:", loss)
+            # errprint("Loss:", loss, loss.size())
             errprint("Training:", count/total*100, "%")
 
+        # Maybe implement some decay on learning rate
+        
 def train_model(train_file, model_file):
     # write your code here. You can add functions as well.
 		# use torch library to save model parameters, hyperparameters, etc. to model_file
